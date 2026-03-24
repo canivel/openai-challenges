@@ -1,0 +1,38 @@
+name: baseline
+description: "Baseline configuration from parameter-golf train_gpt.py"
+
+gpu:
+  num_gpus: 8
+  gpu_type: H100
+  max_training_time_sec: 600
+  max_eval_time_sec: 600
+
+artifact:
+  max_bytes: 16000000
+  quantization: int8
+  compression: zlib
+  compression_level: 9
+
+model:
+  n_layer: 9
+  n_embd: 512
+  n_head: 8
+  n_kv_head: 4
+  mlp_mult: 2.0
+  vocab_size: 1024
+  seq_len: 1024
+  tied_embeddings: true
+
+training:
+  optimizer: muon_adamw
+  matrix_lr: 0.025
+  scalar_lr: 0.025
+  weight_decay: 0.04
+  warmup_steps: 20
+  warmdown_steps: 3500
+  batch_tokens: 524288
+  grad_clip: 0.3
+  ema_decay: 0.997
+  use_ema: true
+  use_swa: true
+  seeds: [42, 1337, 2024]

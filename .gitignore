@@ -1,0 +1,34 @@
+# Reference repos (cloned, not our code)
+autoresearch/
+deer-flow/
+
+# Data files (large, downloaded via script)
+parameter-golf/data/datasets/
+parameter-golf/data/tokenizers/
+parameter-golf/logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Worktrees
+.worktrees/
+
+# Local packages
+.local-packages/
+
+# Pip cache
+pip-cache/
+
+# Temp
+/tmp/
+*.log

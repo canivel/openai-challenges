@@ -1,0 +1,31 @@
+[project]
+name = "golf-research"
+version = "0.1.0"
+description = "Autonomous ML research framework for Parameter Golf challenge - hybrid of autoresearch + deer-flow patterns"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4.0",
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "pyyaml>=6.0",
+    "gitpython>=3.1.0",
+    "rich>=13.0.0",
+    "click>=8.0.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "kernels",
+    "flash-attn>=2.5.0",
+]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+golf-research = "src.cli:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"

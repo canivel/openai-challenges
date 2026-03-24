@@ -1,0 +1,52 @@
+name: sota_target
+description: "Target configuration based on current SOTA (1.1228 BPB) analysis"
+
+gpu:
+  num_gpus: 8
+  gpu_type: H100
+  max_training_time_sec: 600
+  max_eval_time_sec: 600
+
+artifact:
+  max_bytes: 16000000
+  quantization: mixed  # int6 for MLP/attn, int8 for embeddings
+  compression: zlib
+  compression_level: 9
+
+model:
+  n_layer: 11
+  n_embd: 512
+  n_head: 8
+  n_kv_head: 4
+  mlp_mult: 2.6
+  vocab_size: 1024
+  seq_len: 2048
+  tied_embeddings: true
+  # Architecture innovations
+  unet_skip: true
+  xsa_layers: 4  # Exclusive Self Attention on last 4 layers
+  partial_rope_dims: 16  # Only apply RoPE to first 16/64 dims
+  smear_gate: true
+  bigram_hash_buckets: 2048
+  ln_scale_factor: true  # 1/sqrt(layer_idx+1)
+  activation: relu_squared
+
+training:
+  optimizer: muon_adamw
+  matrix_lr: 0.025
+  scalar_lr: 0.025
+  weight_decay: 0.04
+  warmup_steps: 20
+  warmdown_steps: 3500
+  batch_tokens: 524288
+  grad_clip: 0.3
+  ema_decay: 0.997
+  use_ema: true
+  use_swa: true
+  late_qat: true
+  qat_threshold: 0.04  # Final 4% of training
+  seeds: [42, 1337, 2024]
+  # Initialization
+  ortho_init: true
+  mup_scaling: true
+  zero_init_residual: true
