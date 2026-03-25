@@ -73,6 +73,8 @@ class Hyperparameters:
     xsa_last_n = int(os.environ.get("XSA_LAST_N", 4))  # XSA on last N layers
     rope_dims = int(os.environ.get("ROPE_DIMS", 16))  # Partial RoPE (16 of 64 dims)
     ln_scale = bool(int(os.environ.get("LN_SCALE", "1")))  # LN scale factor
+    # External research: Differential Attention (ICLR 2025 Oral, 35% efficiency gain)
+    diff_attn_start = int(os.environ.get("DIFF_ATTN_START", 5))  # Use diff attn from layer N onwards
     # Panel P1: Embedding innovations
     smear_gate = bool(int(os.environ.get("SMEAR_GATE", "1")))
     bigram_hash_buckets = int(os.environ.get("BIGRAM_HASH_BUCKETS", 2048))
@@ -613,6 +615,7 @@ class CausalSelfAttention(nn.Module):
         qk_gain_init: float,
         rope_dims: int = 0,
         use_xsa: bool = False,
+        use_diff_attn: bool = False,
     ):
         super().__init__()
         if dim % num_heads != 0:
@@ -624,6 +627,7 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.rope_dims = rope_dims
         self.use_xsa = use_xsa
+        self.use_diff_attn = use_diff_attn
         if self.head_dim % 2 != 0:
             raise ValueError("head_dim must be even for RoPE")
         kv_dim = self.num_kv_heads * self.head_dim
@@ -633,6 +637,9 @@ class CausalSelfAttention(nn.Module):
         self.proj = CastedLinear(dim, dim, bias=False)
         self.proj._zero_init = True
         self.q_gain = nn.Parameter(torch.full((num_heads,), qk_gain_init, dtype=torch.float32))
+        # Differential Attention: learnable lambda per head (ICLR 2025 Oral)
+        if use_diff_attn:
+            self.diff_lambda = nn.Parameter(torch.zeros(num_heads, dtype=torch.float32))
         # Partial RoPE: only rotate rope_dims dimensions (or full head_dim if 0)
         rotary_dim = rope_dims if rope_dims > 0 else self.head_dim
         self.rotary = Rotary(rotary_dim, base=rope_base)
@@ -648,16 +655,32 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin, self.rope_dims)
         k = apply_rotary_emb(k, cos, sin, self.rope_dims)
         q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
-        y = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=None,
-            is_causal=True,
-            enable_gqa=(self.num_kv_heads != self.num_heads),
-        )
+
+        if self.use_diff_attn:
+            # Differential Attention: split Q,K into two halves, compute difference of attention maps
+            # This cancels noise and focuses on relevant context (35% parameter efficiency gain)
+            half_h = self.num_heads // 2
+            half_kv = self.num_kv_heads // 2
+            q1, q2 = q[:, :half_h], q[:, half_h:]
+            k1, k2 = k[:, :half_kv], k[:, half_kv:]
+            v1 = v[:, :half_kv]
+            # Compute two attention maps and take their difference weighted by lambda
+            y1 = F.scaled_dot_product_attention(q1, k1, v1, is_causal=True,
+                                                 enable_gqa=(half_kv != half_h))
+            y2 = F.scaled_dot_product_attention(q2, k2, v1, is_causal=True,
+                                                 enable_gqa=(half_kv != half_h))
+            lam = torch.sigmoid(self.diff_lambda[:half_h]).to(dtype=y1.dtype)[None, :, None, None]
+            y = y1 - lam * y2
+            # Repeat to match full head count for output projection
+            y = y.repeat(1, 2, 1, 1)
+        else:
+            y = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=None, is_causal=True,
+                enable_gqa=(self.num_kv_heads != self.num_heads),
+            )
+
         # XSA: Exclusive Self Attention — subtract self-value projection
-        if self.use_xsa:
+        if self.use_xsa and not self.use_diff_attn:
             group_size = self.num_heads // self.num_kv_heads
             y_grouped = y.reshape(bsz, self.num_kv_heads, group_size, seqlen, self.head_dim)
             vn = F.normalize(v, dim=-1).unsqueeze(2)  # [B, Hkv, 1, T, D]
@@ -668,7 +691,8 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    # relu^2 MLP from the original modded-nanogpt setup
+    # LeakyReLU² MLP — prevents dead neurons, smoother gradient flow
+    # Both external research teams confirm superiority over ReLU² at this scale
     def __init__(self, dim: int, mlp_mult: int):
         super().__init__()
         hidden = mlp_mult * dim
@@ -677,7 +701,7 @@ class MLP(nn.Module):
         self.proj._zero_init = True
 
     def forward(self, x: Tensor) -> Tensor:
-        x = torch.relu(self.fc(x))
+        x = F.leaky_relu(self.fc(x), negative_slope=0.5)
         return self.proj(x.square())
 
 
@@ -692,13 +716,15 @@ class Block(nn.Module):
         qk_gain_init: float,
         rope_dims: int = 0,
         use_xsa: bool = False,
+        use_diff_attn: bool = False,
         ln_scale_factor: float = 1.0,
     ):
         super().__init__()
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init,
-                                         rope_dims=rope_dims, use_xsa=use_xsa)
+                                         rope_dims=rope_dims, use_xsa=use_xsa,
+                                         use_diff_attn=use_diff_attn)
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -734,6 +760,7 @@ class GPT(nn.Module):
         smear_gate: bool = False,
         bigram_hash_buckets: int = 0,
         bigram_dim: int = 128,
+        diff_attn_start: int = 0,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -761,6 +788,7 @@ class GPT(nn.Module):
                     qk_gain_init,
                     rope_dims=rope_dims,
                     use_xsa=(i >= num_layers - xsa_last_n) if xsa_last_n > 0 else False,
+                    use_diff_attn=(i >= diff_attn_start) if diff_attn_start > 0 else False,
                     ln_scale_factor=1.0 / math.sqrt(i + 1) if ln_scale else 1.0,
                 )
                 for i in range(num_layers)
@@ -940,6 +968,7 @@ def main() -> None:
         smear_gate=args.smear_gate,
         bigram_hash_buckets=args.bigram_hash_buckets,
         bigram_dim=args.bigram_dim,
+        diff_attn_start=args.diff_attn_start,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
