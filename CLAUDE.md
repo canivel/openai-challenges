@@ -21,7 +21,7 @@ deer-flow/               # ByteDance's DeerFlow (reference)
 - **BPB** (bits per byte): Primary metric. Lower is better.
 - **Artifact size**: Code + compressed model <= 16,000,000 bytes
 - **Training time**: <= 10 minutes on 8x H100 SXM
-- **Current SOTA**: 1.1228 BPB
+- **Current SOTA**: 1.1194 BPB (LeakyReLU² + Legal TTT + Parallel Muon, Mar 23)
 
 ## Agent System
 We have 5 specialized agents in `.claude/agents/`:
