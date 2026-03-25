@@ -1,10 +1,10 @@
-# GPU Grant Submissions (Updated v3 — March 25, 2026)
+# GPU Grant Submissions (Updated v4 — March 25, 2026)
 
 ## Quick Grant ($25)
 
 ### What are you going to do with it?
 
-We validated 3 model versions locally on RTX 3080 (v1: 17M params, v2: 26.8M with 11 SOTA innovations, v3: +Differential Attention + LeakyReLU²). All train successfully. The $25 funds our first 8xH100 run to enable torch.compile (3-5x speedup), FP8 training (2x TFLOPS), and full 10-min budget — the three things we can't test locally. Our autonomous research framework tracks every experiment via git, so every dollar produces reproducible, logged results. First priority: establish true BPB with our v3 architecture.
+We've already run 4 experiments on 1xH100 achieving val_bpb 1.3208 in 10 min (1,209 steps). Built int6+GPTQ-lite quantization pipeline that cuts artifact size 43.6%. The $25 funds our first 8xH100 run to scale from ~1,200 to ~7,000+ steps, test int6 vs int8 quantization gap on properly-trained weights, and run sliding window evaluation (-0.033 BPB free). Our autonomous research framework tracks every experiment via git, so every dollar produces logged, reproducible results.
 
 ---
 
@@ -12,30 +12,31 @@ We validated 3 model versions locally on RTX 3080 (v1: 17M params, v2: 26.8M wit
 
 ### Brief description of your approach (max 1,500 characters)
 
-We built an autonomous research framework combining autoresearch (metric-driven loops) with DeerFlow (parallel agents). Validated 3 model versions on RTX 3080. Cross-referenced two independent research analyses of the competition, identifying high-value untried techniques and confirmed failures.
+We built an autonomous research framework (autoresearch loops + DeerFlow parallel agents). Ran 4 experiments on 1xH100: best pre-quant BPB 1.3208 in 10 min. Validated 3 model versions locally on RTX 3080. Cross-referenced two independent research analyses + 4 quantization papers (TurboQuant, QJL, PolarQuant).
 
-Our v3 model implements 13 techniques stacked from SOTA analysis:
-- 11-layer transformer, 3x MLP, U-Net skips (architecture)
-- XSA + Differential Attention + Partial RoPE 16d (attention)
-- LeakyReLU² activation (gradient flow)
-- SmearGate + BigramHash (embedding context)
-- LN Scale + EMA 0.997 + orthogonal init + muP + grad clip 0.3 (training)
+Our v3 model (26.8M params) implements 13 stacked techniques:
+- 11-layer transformer, 3x MLP, U-Net skips, tied embeddings
+- XSA + Differential Attention + Partial RoPE 16d
+- LeakyReLU², SmearGate, BigramHash 2048
+- EMA 0.997, orthogonal init, muP, LN Scale, grad clip 0.3
 
-Planned for H100 runs (remaining 80% of expected improvement):
+Implemented int6+GPTQ-lite quantization (per-row optimal clip search across 5 percentiles). Locally verified: 43.6% smaller artifacts. SOTA shows 0.001 BPB quant gap vs our current 0.13.
+
+Remaining (need 8xH100):
+- Scale from 1,209→7,100 steps (8x GPU parallelism)
+- Int6 quantization gap measurement on trained weights
+- Sliding window eval stride=64 (-0.033 BPB free)
 - FP8 training: 2x TFLOPS = +600-1000 extra steps
-- Legal score-first TTT: LoRA adaptation during eval (-0.03 BPB)
-- Partial weight sharing + LoRA: 8 unique → 14 effective layers
-- Learned non-uniform quantization + custom codebook + Huffman
-- Int6 + GPTQ-lite clip search
-- Parallel Muon + parameter banking
+- Late QAT with int6 fake-quantization
+- Multi-seed validation (3+ seeds, p<0.01)
 
-Cross-validated confirmed failures to avoid: MoE (<500M), full depth recurrence (900x quant error), INT4, SSM/Mamba, SwiGLU, MLA, LAWA, MAML Meta-TTT.
+Cross-validated failures to avoid: MoE (<500M), full depth recurrence, INT4, SSM/Mamba, SwiGLU, MLA.
 
-Conservative target: ~1.07 BPB (non-TTT). Aggressive: ~1.04 BPB (with legal TTT).
+Target: ~1.10-1.12 BPB (competitive with SOTA 1.1228).
 
 ### What have you tried so far? (max 255 characters)
 
-3 model versions on RTX 3080. v3: 26.8M params, 13 SOTA techniques, LeakyReLU² + Differential Attention. Cross-validated 2 independent research analyses. Framework + agents + docs ready. Need H100 for torch.compile + FP8.
+4 runs on 1xH100: best 1.3208 BPB. 3 local versions on RTX 3080. Built int6+GPTQ-lite quant (43.6% smaller). Analyzed 4 quant papers. 13-technique model stack. Framework + agents ready. Need 8xH100 for full training + eval.
 
 ### Link(s) to your PR submission
 
@@ -47,36 +48,37 @@ https://github.com/canivel/openai-challenges
 
 ### Quick Grant - Plain Text
 ```
-We validated 3 model versions locally on RTX 3080 (v1: 17M params, v2: 26.8M with 11 SOTA innovations, v3: +Differential Attention + LeakyReLU²). All train successfully. The $25 funds our first 8xH100 run to enable torch.compile (3-5x speedup), FP8 training (2x TFLOPS), and full 10-min budget — the three things we can't test locally. Our autonomous research framework tracks every experiment via git, so every dollar produces reproducible, logged results. First priority: establish true BPB with our v3 architecture.
+We've already run 4 experiments on 1xH100 achieving val_bpb 1.3208 in 10 min (1,209 steps). Built int6+GPTQ-lite quantization pipeline that cuts artifact size 43.6%. The $25 funds our first 8xH100 run to scale from ~1,200 to ~7,000+ steps, test int6 vs int8 quantization gap on properly-trained weights, and run sliding window evaluation (-0.033 BPB free). Our autonomous research framework tracks every experiment via git, so every dollar produces logged, reproducible results.
 ```
 
-### Development Grant - Brief Description (1,496 chars)
+### Development Grant - Brief Description (1,497 chars)
 ```
-We built an autonomous research framework combining autoresearch (metric-driven loops) with DeerFlow (parallel agents). Validated 3 model versions on RTX 3080. Cross-referenced two independent research analyses of the competition, identifying high-value untried techniques and confirmed failures.
+We built an autonomous research framework (autoresearch loops + DeerFlow parallel agents). Ran 4 experiments on 1xH100: best pre-quant BPB 1.3208 in 10 min. Validated 3 model versions locally on RTX 3080. Cross-referenced two independent research analyses + 4 quantization papers (TurboQuant, QJL, PolarQuant).
 
-Our v3 model implements 13 techniques stacked from SOTA analysis:
-- 11-layer transformer, 3x MLP, U-Net skips (architecture)
-- XSA + Differential Attention + Partial RoPE 16d (attention)
-- LeakyReLU² activation (gradient flow)
-- SmearGate + BigramHash (embedding context)
-- LN Scale + EMA 0.997 + orthogonal init + muP + grad clip 0.3 (training)
+Our v3 model (26.8M params) implements 13 stacked techniques:
+- 11-layer transformer, 3x MLP, U-Net skips, tied embeddings
+- XSA + Differential Attention + Partial RoPE 16d
+- LeakyReLU², SmearGate, BigramHash 2048
+- EMA 0.997, orthogonal init, muP, LN Scale, grad clip 0.3
 
-Planned for H100 runs (remaining 80% of expected improvement):
+Implemented int6+GPTQ-lite quantization (per-row optimal clip search across 5 percentiles). Locally verified: 43.6% smaller artifacts. SOTA shows 0.001 BPB quant gap vs our current 0.13.
+
+Remaining (need 8xH100):
+- Scale from 1,209→7,100 steps (8x GPU parallelism)
+- Int6 quantization gap measurement on trained weights
+- Sliding window eval stride=64 (-0.033 BPB free)
 - FP8 training: 2x TFLOPS = +600-1000 extra steps
-- Legal score-first TTT: LoRA adaptation during eval (-0.03 BPB)
-- Partial weight sharing + LoRA: 8 unique → 14 effective layers
-- Learned non-uniform quantization + custom codebook + Huffman
-- Int6 + GPTQ-lite clip search
-- Parallel Muon + parameter banking
+- Late QAT with int6 fake-quantization
+- Multi-seed validation (3+ seeds, p<0.01)
 
-Cross-validated confirmed failures to avoid: MoE (<500M), full depth recurrence (900x quant error), INT4, SSM/Mamba, SwiGLU, MLA, LAWA, MAML Meta-TTT.
+Cross-validated failures to avoid: MoE (<500M), full depth recurrence, INT4, SSM/Mamba, SwiGLU, MLA.
 
-Conservative target: ~1.07 BPB (non-TTT). Aggressive: ~1.04 BPB (with legal TTT).
+Target: ~1.10-1.12 BPB (competitive with SOTA 1.1228).
 ```
 
-### What have you tried so far? (247 chars)
+### What have you tried so far? (254 chars)
 ```
-3 model versions on RTX 3080. v3: 26.8M params, 13 SOTA techniques, LeakyReLU² + Differential Attention. Cross-validated 2 independent research analyses. Framework + agents + docs ready. Need H100 for torch.compile + FP8.
+4 runs on 1xH100: best 1.3208 BPB. 3 local versions on RTX 3080. Built int6+GPTQ-lite quant (43.6% smaller). Analyzed 4 quant papers. 13-technique model stack. Framework + agents ready. Need 8xH100 for full training + eval.
 ```
 
 ### PR Link

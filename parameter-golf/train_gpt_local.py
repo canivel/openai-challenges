@@ -320,6 +320,15 @@ INT8_PER_ROW_SCALE_DTYPE = torch.float16
 INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 
+# --- Int6 + GPTQ-lite quantization (from SOTA analysis + TurboQuant/PolarQuant research) ---
+# Int6 uses [-31, 31] range (6-bit), stored in int8 containers.
+# GPTQ-lite: per-row optimal clip percentile search across 5 candidates.
+# Embeddings stay int8 for higher fidelity (dual-use: input + output).
+QUANT_MODE = os.environ.get("QUANT_MODE", "int6_gptq")  # "int8", "int6", "int6_gptq"
+GPTQ_CLIP_PERCENTILES = [0.999, 0.9995, 0.9999, 0.99999, 1.0]
+INT6_MAX = 31
+INT6_MIN = -32
+
 def tensor_nbytes(t: Tensor) -> int:
     return int(t.numel()) * int(t.element_size())
 
@@ -331,33 +340,83 @@ def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, s
         return t.to(dtype=INT8_KEEP_FLOAT_STORE_DTYPE).contiguous()
     return t
 
-def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
+def quantize_int6_per_row_gptq(t: Tensor) -> tuple[Tensor, Tensor]:
+    """Int6 quantization with GPTQ-lite per-row optimal clip percentile search.
+
+    For each row, tries 5 clip percentiles and picks the one minimizing
+    reconstruction MSE. This is free (post-training) and saves ~0.0006 BPB
+    over fixed-percentile int6.
+    """
+    t32 = t.float()
+    best_q = torch.zeros_like(t32, dtype=torch.int8)
+    best_scale = torch.zeros(t32.shape[0], dtype=torch.float32)
+    best_mse = torch.full((t32.shape[0],), float("inf"), dtype=torch.float32)
+
+    for pct in GPTQ_CLIP_PERCENTILES:
+        if pct < 1.0:
+            clip_abs = torch.quantile(t32.abs(), pct, dim=1)
+        else:
+            clip_abs = t32.abs().amax(dim=1)
+        scale = (clip_abs / float(INT6_MAX)).clamp_min(1.0 / float(INT6_MAX))
+        q = torch.clamp(torch.round(t32 / scale[:, None]), float(INT6_MIN), float(INT6_MAX)).to(torch.int8)
+        recon = q.float() * scale[:, None]
+        mse = (t32 - recon).pow(2).mean(dim=1)
+        improved = mse < best_mse
+        if improved.any():
+            best_q[improved] = q[improved]
+            best_scale[improved] = scale[improved]
+            best_mse[improved] = mse[improved]
+
+    return best_q.contiguous(), best_scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
+
+def quantize_int6_per_row(t: Tensor) -> tuple[Tensor, Tensor]:
+    """Simple int6 quantization without GPTQ search (faster, slightly worse)."""
+    t32 = t.float()
+    clip_abs = t32.abs().amax(dim=1)
+    scale = (clip_abs / float(INT6_MAX)).clamp_min(1.0 / float(INT6_MAX))
+    q = torch.clamp(torch.round(t32 / scale[:, None]), float(INT6_MIN), float(INT6_MAX)).to(torch.int8)
+    return q.contiguous(), scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
+
+def quantize_int8_per_row(t: Tensor) -> tuple[Tensor, Tensor]:
+    """Standard int8 per-row quantization with percentile clipping."""
+    t32 = t.float()
+    clip_abs = (
+        torch.quantile(t32.abs(), INT8_CLIP_Q, dim=1)
+        if t32.numel()
+        else torch.empty((t32.shape[0],), dtype=torch.float32)
+    )
+    clipped = torch.maximum(torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None])
+    scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
+    q = torch.clamp(torch.round(clipped / scale[:, None]), -127, 127).to(torch.int8).contiguous()
+    return q, scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
+
+def quantize_float_tensor(t: Tensor, name: str = "") -> tuple[Tensor, Tensor]:
     t32 = t.float()
     if t32.ndim == 2:
-        # Matrices get one scale per row, which usually tracks output-channel
-        # ranges much better than a single tensor-wide scale.
-        clip_abs = (
-            torch.quantile(t32.abs(), INT8_CLIP_Q, dim=1)
-            if t32.numel()
-            else torch.empty((t32.shape[0],), dtype=torch.float32)
-        )
-        clipped = torch.maximum(torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None])
-        scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
-        q = torch.clamp(torch.round(clipped / scale[:, None]), -127, 127).to(torch.int8).contiguous()
-        return q, scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
+        # Embeddings stay int8 (dual-use: input + output, higher fidelity needed)
+        is_embedding = "tok_emb" in name or "lm_head" in name
+        if QUANT_MODE == "int8" or is_embedding:
+            return quantize_int8_per_row(t32)
+        elif QUANT_MODE == "int6_gptq":
+            return quantize_int6_per_row_gptq(t32)
+        elif QUANT_MODE == "int6":
+            return quantize_int6_per_row(t32)
+        else:
+            return quantize_int8_per_row(t32)
 
-    # Vectors / scalars use a simpler per-tensor scale.
+    # Vectors / scalars use a simpler per-tensor scale (always int8).
     clip_abs = float(torch.quantile(t32.abs().flatten(), INT8_CLIP_Q).item()) if t32.numel() else 0.0
     scale = torch.tensor(clip_abs / 127.0 if clip_abs > 0 else 1.0, dtype=torch.float32)
     q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
     return q, scale
 
 def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
-    # Single supported clean-script export format:
-    # - per-row int8 for 2D float tensors
-    # - per-tensor int8 for other float tensors
-    # - exact passthrough for non-floats
-    # - passthrough for small float tensors, stored as fp16 to save bytes
+    # Quantization pipeline:
+    # - Int6 + GPTQ-lite for 2D MLP/attention matrices (per-row clip search)
+    # - Int8 for embeddings (higher fidelity, dual-use)
+    # - Per-tensor int8 for 1D float tensors
+    # - FP32 passthrough for control tensors (scales, gates, etc.)
+    # - FP16 passthrough for small float tensors
     quantized: dict[str, Tensor] = {}
     scales: dict[str, Tensor] = {}
     dtypes: dict[str, str] = {}
@@ -390,7 +449,7 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
             continue
 
         stats["num_float_tensors"] += 1
-        q, s = quantize_float_tensor(t)
+        q, s = quantize_float_tensor(t, name)
         if s.ndim > 0:
             qmeta[name] = {"scheme": "per_row", "axis": 0}
         quantized[name] = q
@@ -399,7 +458,7 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
         stats["int8_payload_bytes"] += tensor_nbytes(q) + tensor_nbytes(s)
 
     obj: dict[str, object] = {
-        "__quant_format__": "int8_clean_per_row_v1",
+        "__quant_format__": "int6_gptq_per_row_v1" if QUANT_MODE.startswith("int6") else "int8_clean_per_row_v1",
         "quantized": quantized,
         "scales": scales,
         "dtypes": dtypes,
@@ -1229,6 +1288,8 @@ def main() -> None:
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
 
+    if master_process:
+        log0(f"Quantization mode: {QUANT_MODE}")
     quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
