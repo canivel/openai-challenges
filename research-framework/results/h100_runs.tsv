@@ -1,0 +1,5 @@
+run	config	gpu	time_sec	steps	pre_quant_bpb	post_quant_bpb	quant_gap	artifact_bytes	peak_vram_mib	ms_per_step
+1	v3_full_5min	1xH100	300	586	1.5492	2.4971	0.9479	12539846	15040	512
+2	v3_no_diff_5min	1xH100	300	577	1.5603	2.5356	0.9753	12716583	15310	520
+3	v3_full_10min	1xH100	600	1209	1.3208	1.4501	0.1293	16160797	15043	497
+4	v3_lowlr025_10min	1xH100	600	1119	1.3652	1.5666	0.2014	14613815	15043	536
