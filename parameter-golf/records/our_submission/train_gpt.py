@@ -1049,7 +1049,7 @@ def collect_hessians_ar(model, args, device, num_seqs=64, seq_len=2048, temperat
             seed_gen = torch.Generator(device=device).manual_seed(start)
             tokens = torch.randint(0, args.vocab_size, (bs, 1), device=device, generator=seed_gen)
             for _ in range(seq_len - 1):
-                logits = model(tokens, None)          # [bs, t, vocab]
+                logits = model.forward_logits(tokens)  # [bs, t, vocab]
                 next_logits = logits[:, -1, :].float() / temperature
                 probs = torch.softmax(next_logits, dim=-1)
                 next_tok = torch.multinomial(probs, num_samples=1)
