@@ -1135,6 +1135,7 @@ def main() -> None:
     global zeropower_via_newtonschulz5
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
+    torch._dynamo.config.cache_size_limit = 64
     zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     rank = int(os.environ.get("RANK", "0"))
@@ -1554,6 +1555,7 @@ def main() -> None:
             m.float()
     restore_low_dim_params_to_fp32(eval_model)
     eval_model.load_state_dict(deq_state, strict=True)
+    torch._dynamo.config.cache_size_limit = 64
     compiled_eval = torch.compile(eval_model, dynamic=False, fullgraph=True)
     torch.cuda.synchronize()
     t_qeval = time.perf_counter()
@@ -1585,6 +1587,7 @@ def main() -> None:
         )
         log0(f"final_int6_sliding_window_exact val_loss:{sw_val_loss:.8f} val_bpb:{sw_val_bpb:.8f}")
     if args.slot_enabled:
+        torch._dynamo.config.cache_size_limit = 64
         torch.cuda.synchronize()
         t_slot = time.perf_counter()
         slot_loss, slot_bpb = eval_val_sliding_slot(
