@@ -8,4 +8,4 @@ data/manifest.json
 data/docs_selected.jsonl
 .mypy_cache/
 .venv
-logs/
+logs/final_model_seed1337.int6.ptz
