@@ -87,8 +87,8 @@ class Hyperparameters:
     ve_layers = os.environ.get("VE_LAYERS", "9,10")
     gptq_calib_batches = int(os.environ.get("GPTQ_CALIB_BATCHES", 32))
     slot_enabled = bool(int(os.environ.get("SLOT_ENABLED", "1")))
-    slot_steps = int(os.environ.get("SLOT_STEPS", 64))
-    slot_lr = float(os.environ.get("SLOT_LR", 0.010))
+    slot_steps = int(os.environ.get("SLOT_STEPS", 46))
+    slot_lr = float(os.environ.get("SLOT_LR", 0.025))
     slot_lr_min = float(os.environ.get("SLOT_LR_MIN", 0.001))
     slot_warmstart = float(os.environ.get("SLOT_WARMSTART", 0.85))  # 0=disabled; 0.85=warmstart from prev window
     slot_momentum_carry = bool(int(os.environ.get("SLOT_MOMENTUM_CARRY", "1")))  # carry Adam state between windows
