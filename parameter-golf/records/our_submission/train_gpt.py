@@ -1158,10 +1158,18 @@ def main() -> None:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     from torch.backends.cuda import enable_cudnn_sdp, enable_flash_sdp, enable_math_sdp, enable_mem_efficient_sdp
-    enable_cudnn_sdp(False)
-    enable_flash_sdp(True)
-    enable_mem_efficient_sdp(False)
-    enable_math_sdp(False)
+    if os.environ.get("LOCAL_GPU", ""):
+        # Consumer GPUs (3080, 4090, etc.) — enable all SDP backends
+        enable_cudnn_sdp(True)
+        enable_flash_sdp(True)
+        enable_mem_efficient_sdp(True)
+        enable_math_sdp(True)
+    else:
+        # H100 — flash only for max throughput
+        enable_cudnn_sdp(False)
+        enable_flash_sdp(True)
+        enable_mem_efficient_sdp(False)
+        enable_math_sdp(False)
     logfile = None
     if master_process:
         os.makedirs("logs", exist_ok=True)
@@ -1200,6 +1208,11 @@ def main() -> None:
     effective_eval_seq_len = args.eval_seq_len if args.eval_seq_len > 0 else args.train_seq_len
     val_seq_len = max(args.train_seq_len, effective_eval_seq_len)
     val_tokens = load_validation_tokens(args.val_files, val_seq_len)
+    # Local testing: cap val tokens to speed up eval (0 = use all, default for H100)
+    val_tokens_limit = int(os.environ.get("VAL_TOKENS_LIMIT", "0"))
+    if val_tokens_limit > 0 and val_tokens.numel() > val_tokens_limit:
+        val_tokens = val_tokens[:val_tokens_limit]
+        log0(f"val_tokens:capped to {val_tokens_limit} for local testing")
     base_bytes_lut, has_leading_space_lut, is_boundary_token_lut = build_sentencepiece_luts(
         sp, args.vocab_size, device
     )
