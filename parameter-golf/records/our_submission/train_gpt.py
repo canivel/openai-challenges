@@ -91,6 +91,14 @@ class Hyperparameters:
     slot_lr = float(os.environ.get("SLOT_LR", 0.010))
     slot_lr_min = float(os.environ.get("SLOT_LR_MIN", 0.001))
     slot_warmstart = float(os.environ.get("SLOT_WARMSTART", 0.85))  # 0=disabled; 0.85=warmstart from prev window
+    slot_momentum_carry = bool(int(os.environ.get("SLOT_MOMENTUM_CARRY", "1")))  # carry Adam state between windows
+    slot_adaptive_wd = bool(int(os.environ.get("SLOT_ADAPTIVE_WD", "1")))  # FTRL-optimal decaying weight_decay
+    slot_wd_init = float(os.environ.get("SLOT_WD_INIT", 0.01))  # initial weight decay for adaptive mode
+    # KNN-LM cache: interpolate with token cache from already-scored positions
+    knn_enabled = bool(int(os.environ.get("KNN_ENABLED", "1")))
+    knn_cache_size = int(os.environ.get("KNN_CACHE_SIZE", 4096))  # max cached (hidden, token) pairs
+    knn_lambda = float(os.environ.get("KNN_LAMBDA", 0.05))  # interpolation weight for KNN predictions
+    knn_temperature = float(os.environ.get("KNN_TEMPERATURE", 10.0))  # softmax temperature for KNN distances
     # Depth recurrence: repeat layers for free depth (disabled by default — costs 18% compute, hurts with fixed time budget)
     recur_layers_str = os.environ.get("RECUR_LAYERS", "").strip()
     recur_start_step = int(os.environ.get("RECUR_START_STEP", 3000))
@@ -843,6 +851,63 @@ def eval_val_sliding(
     tokens_per_byte = token_count.item() / byte_count.item()
     base_model.train()
     return val_loss, bits_per_token * tokens_per_byte
+class KNNCache:
+    """Token-level KNN cache for interpolation with LM predictions.
+    Stores (hidden_state, next_token) pairs from already-scored positions.
+    At prediction time, finds nearest neighbors and builds a distribution."""
+    def __init__(self, capacity: int, hidden_dim: int, vocab_size: int,
+                 temperature: float = 10.0, device: torch.device = None):
+        self.capacity = capacity
+        self.vocab_size = vocab_size
+        self.temperature = temperature
+        self.device = device
+        self.keys = torch.zeros(capacity, hidden_dim, device=device, dtype=torch.float32)
+        self.vals = torch.zeros(capacity, dtype=torch.int64, device=device)
+        self.count = 0
+        self.ptr = 0
+    def add(self, hidden: Tensor, tokens: Tensor):
+        """Add batch of (hidden, next_token) pairs. hidden: [N, D], tokens: [N]."""
+        n = hidden.size(0)
+        if n == 0:
+            return
+        if n >= self.capacity:
+            hidden = hidden[-self.capacity:]
+            tokens = tokens[-self.capacity:]
+            n = self.capacity
+        end = self.ptr + n
+        if end <= self.capacity:
+            self.keys[self.ptr:end] = hidden.detach()
+            self.vals[self.ptr:end] = tokens.detach()
+        else:
+            first = self.capacity - self.ptr
+            self.keys[self.ptr:] = hidden[:first].detach()
+            self.vals[self.ptr:] = tokens[:first].detach()
+            rest = n - first
+            self.keys[:rest] = hidden[first:].detach()
+            self.vals[:rest] = tokens[first:].detach()
+        self.ptr = end % self.capacity
+        self.count = min(self.count + n, self.capacity)
+    def get_knn_probs(self, query: Tensor, k: int = 32) -> Tensor | None:
+        """Compute KNN probability distribution. query: [B, S, D] -> returns [B, S, V] or None."""
+        if self.count < k:
+            return None
+        B, S, D = query.shape
+        active = self.keys[:self.count]  # [C, D]
+        active_vals = self.vals[:self.count]  # [C]
+        q_flat = query.reshape(-1, D)  # [B*S, D]
+        # Compute distances in chunks to avoid OOM
+        chunk_size = min(B * S, 256)
+        probs_list = []
+        for ci in range(0, q_flat.size(0), chunk_size):
+            q_chunk = q_flat[ci:ci + chunk_size]  # [chunk, D]
+            dists = torch.cdist(q_chunk.unsqueeze(0), active.unsqueeze(0)).squeeze(0)  # [chunk, C]
+            topk_dists, topk_idx = dists.topk(k, dim=-1, largest=False)  # [chunk, k]
+            topk_tokens = active_vals[topk_idx]  # [chunk, k]
+            weights = F.softmax(-topk_dists / self.temperature, dim=-1)  # [chunk, k]
+            chunk_probs = torch.zeros(q_chunk.size(0), self.vocab_size, device=self.device)
+            chunk_probs.scatter_add_(1, topk_tokens, weights)
+            probs_list.append(chunk_probs)
+        return torch.cat(probs_list, dim=0).reshape(B, S, self.vocab_size)
 def eval_val_sliding_slot(
     args: Hyperparameters,
     base_model: nn.Module,
@@ -878,8 +943,20 @@ def eval_val_sliding_slot(
               else base_model.lm_head.weight).detach().float()
     softcap = base_model.logit_softcap
     warmstart_alpha = args.slot_warmstart
+    momentum_carry = args.slot_momentum_carry
+    adaptive_wd = args.slot_adaptive_wd
+    wd_init = args.slot_wd_init
+    knn_lambda = args.knn_lambda if args.knn_enabled else 0.0
+    # Initialize KNN cache
+    knn_cache = None
+    if knn_lambda > 0:
+        hidden_dim = base_model.tok_emb.weight.size(1)
+        knn_cache = KNNCache(args.knn_cache_size, hidden_dim, args.vocab_size,
+                             temperature=args.knn_temperature, device=device)
     prev_delta = None
     prev_bias = None
+    slot_opt = None  # persist across windows when momentum_carry=True
+    window_idx = 0
     for bi in range(0, len(my_windows), batch_seqs):
         batch_ws = my_windows[bi:bi + batch_seqs]
         bsz = len(batch_ws)
@@ -907,13 +984,22 @@ def eval_val_sliding_slot(
         else:
             delta = torch.zeros(bsz, 1, hidden_f.size(-1), device=device, dtype=torch.float32, requires_grad=True)
             logit_bias = torch.zeros(bsz, 1, proj_w.size(0), device=device, dtype=torch.float32, requires_grad=True)
-        slot_opt = torch.optim.AdamW([delta, logit_bias], lr=slot_lr)
+        # Free win #1: Adaptive weight decay (FTRL-optimal)
+        current_wd = wd_init / math.sqrt(1.0 + 0.1 * window_idx) if adaptive_wd else wd_init
+        # Free win #2: Momentum carryover — reuse optimizer state across windows
+        if momentum_carry and slot_opt is not None and prev_delta is not None and prev_delta.size(0) == bsz:
+            # Update param refs without resetting momentum
+            slot_opt.param_groups[0]['params'] = [delta, logit_bias]
+            slot_opt.param_groups[0]['weight_decay'] = current_wd
+        else:
+            slot_opt = torch.optim.AdamW([delta, logit_bias], lr=slot_lr, weight_decay=current_wd)
         targets_flat = y_batch.reshape(-1)
         for _step in range(slot_steps):
             _lr = slot_lr_min + 0.5 * (slot_lr - slot_lr_min) * (1 + math.cos(math.pi * _step / slot_steps))
             for _pg in slot_opt.param_groups: _pg['lr'] = _lr
             h = hidden_f + delta
             logits_proj = F.linear(h, proj_w) + logit_bias
+            # Free win #3: float32 logits for precision
             logits = softcap * torch.tanh(logits_proj / softcap)
             nll_opt = F.cross_entropy(logits.reshape(-1, logits.size(-1)),
                                       targets_flat, reduction="none").reshape(bsz, seq_len)
@@ -923,12 +1009,33 @@ def eval_val_sliding_slot(
         if warmstart_alpha > 0:
             prev_delta = delta.detach()
             prev_bias = logit_bias.detach()
+        window_idx += 1
         with torch.no_grad():
             h = hidden_f + delta
             logits_proj = F.linear(h, proj_w) + logit_bias
             logits = softcap * torch.tanh(logits_proj / softcap)
-            nll = F.cross_entropy(logits.reshape(-1, logits.size(-1)),
-                                  targets_flat, reduction="none").reshape(bsz, seq_len)
+            # KNN-LM: interpolate with cache predictions
+            if knn_cache is not None and knn_lambda > 0 and knn_cache.count >= 32:
+                lm_probs = F.softmax(logits, dim=-1)  # [B, S, V]
+                knn_probs = knn_cache.get_knn_probs(hidden_f)  # [B, S, V] or None
+                if knn_probs is not None:
+                    mixed_probs = (1 - knn_lambda) * lm_probs + knn_lambda * knn_probs
+                    mixed_probs = mixed_probs.clamp_min(1e-10)
+                    nll = -torch.log(mixed_probs.gather(2, y_batch.unsqueeze(-1)).squeeze(-1))
+                    nll = nll.reshape(bsz, seq_len)
+                else:
+                    nll = F.cross_entropy(logits.reshape(-1, logits.size(-1)),
+                                          targets_flat, reduction="none").reshape(bsz, seq_len)
+            else:
+                nll = F.cross_entropy(logits.reshape(-1, logits.size(-1)),
+                                      targets_flat, reduction="none").reshape(bsz, seq_len)
+            # Feed scored positions into KNN cache
+            if knn_cache is not None:
+                for i, ws in enumerate(batch_ws):
+                    wlen = wlens[i]
+                    s = 0 if ws == 0 else max(wlen - stride, 0)
+                    if wlen - s > 0:
+                        knn_cache.add(hidden_f[i, s:wlen], y_batch[i, s:wlen])
         for i, ws in enumerate(batch_ws):
             wlen = wlens[i]
             s = 0 if ws == 0 else max(wlen - stride, 0)
